@@ -580,6 +580,11 @@ class PassportClient:
         self.queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self.decoder = LineDecoder()
         self.chunk_size = 180
+        self.connect_timeout = 30.0
+        self.pairing_write_timeout = 45.0
+        self.notify_timeout = 10.0
+        self.write_timeout = 10.0
+        self.disconnect_timeout = 5.0
 
     async def __aenter__(self) -> "PassportClient":
         devices = await BleakScanner.discover(timeout=6.0, return_adv=True)
@@ -592,39 +597,73 @@ class PassportClient:
         if candidate is None:
             raise RuntimeError("未发现 AI Passport；请确认设备已开机并停留在蓝牙可连接状态")
         self.client = BleakClient(candidate, timeout=60.0)
-        await self.client.connect()
-
-        # On macOS, touching an encrypted characteristic is what triggers pairing.
-        paired = False
-        for attempt in range(60):
+        try:
             try:
-                await self.client.write_gatt_char(NUS_RX_UUID, b'{"cmd":"status"}\n', response=True)
-                paired = True
-                break
-            except BleakGATTProtocolError as error:
-                if getattr(error, "error_code", None) not in (5, 15) and "Encryption" not in str(error):
-                    raise
-                if attempt == 0:
-                    print("等待蓝牙配对：请在 Mac 输入护照屏幕上的配对码…", file=sys.stderr)
-                await asyncio.sleep(1.0)
-        if not paired:
-            raise RuntimeError("蓝牙配对超时；请重新运行命令并输入设备配对码")
+                await asyncio.wait_for(self.client.connect(), self.connect_timeout)
+            except TimeoutError as error:
+                raise RuntimeError("蓝牙连接超时；将自动断开后重试") from error
 
-        await self.client.start_notify(NUS_TX_UUID, self._on_notification)
-        characteristic = self.client.services.get_characteristic(NUS_RX_UUID)
-        if characteristic is not None:
-            limit = int(getattr(characteristic, "max_write_without_response_size", 180))
-            self.chunk_size = min(180, max(20, limit))
-        await asyncio.sleep(0.3)
-        return self
+            # On macOS, touching an encrypted characteristic is what triggers pairing.
+            paired = False
+            for attempt in range(60):
+                try:
+                    await asyncio.wait_for(
+                        self.client.write_gatt_char(
+                            NUS_RX_UUID,
+                            b'{"cmd":"status"}\n',
+                            response=True,
+                        ),
+                        self.pairing_write_timeout,
+                    )
+                    paired = True
+                    break
+                except TimeoutError as error:
+                    raise RuntimeError("蓝牙配对等待超时；将自动断开后重试") from error
+                except BleakGATTProtocolError as error:
+                    if getattr(error, "error_code", None) not in (5, 15) and "Encryption" not in str(error):
+                        raise
+                    if attempt == 0:
+                        print("等待蓝牙配对：请在 Mac 输入护照屏幕上的配对码…", file=sys.stderr)
+                    await asyncio.sleep(1.0)
+            if not paired:
+                raise RuntimeError("蓝牙配对超时；请重新运行命令并输入设备配对码")
+
+            try:
+                await asyncio.wait_for(
+                    self.client.start_notify(NUS_TX_UUID, self._on_notification),
+                    self.notify_timeout,
+                )
+            except TimeoutError as error:
+                raise RuntimeError("蓝牙通知订阅超时；将自动断开后重试") from error
+            characteristic = self.client.services.get_characteristic(NUS_RX_UUID)
+            if characteristic is not None:
+                limit = int(getattr(characteristic, "max_write_without_response_size", 180))
+                self.chunk_size = min(180, max(20, limit))
+            await asyncio.sleep(0.3)
+            return self
+        except Exception:
+            await self._disconnect()
+            raise
 
     async def __aexit__(self, *_args: Any) -> None:
-        if self.client and self.client.is_connected:
+        await self._disconnect()
+
+    async def _disconnect(self) -> None:
+        client, self.client = self.client, None
+        if client is None:
+            return
+        if client.is_connected:
             try:
-                await self.client.stop_notify(NUS_TX_UUID)
+                await asyncio.wait_for(
+                    client.stop_notify(NUS_TX_UUID),
+                    self.disconnect_timeout,
+                )
             except Exception:
                 pass
-            await self.client.disconnect()
+        try:
+            await asyncio.wait_for(client.disconnect(), self.disconnect_timeout)
+        except Exception:
+            pass
 
     def _on_notification(self, _sender: Any, data: bytearray) -> None:
         for message in self.decoder.feed(bytes(data)):
@@ -635,11 +674,17 @@ class PassportClient:
             raise RuntimeError("设备尚未连接")
         raw = (json.dumps(payload, ensure_ascii=True, separators=(",", ":")) + "\n").encode("utf-8")
         for offset in range(0, len(raw), self.chunk_size):
-            await self.client.write_gatt_char(
-                NUS_RX_UUID,
-                raw[offset:offset + self.chunk_size],
-                response=False,
-            )
+            try:
+                await asyncio.wait_for(
+                    self.client.write_gatt_char(
+                        NUS_RX_UUID,
+                        raw[offset:offset + self.chunk_size],
+                        response=False,
+                    ),
+                    self.write_timeout,
+                )
+            except TimeoutError as error:
+                raise RuntimeError("蓝牙写入超时；将自动断开后重试") from error
             await asyncio.sleep(0.01)
 
     async def request(self, payload: dict[str, Any], timeout: float = 4.0) -> dict[str, Any]:

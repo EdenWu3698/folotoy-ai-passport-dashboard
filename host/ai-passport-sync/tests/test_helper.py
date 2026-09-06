@@ -1,14 +1,18 @@
+import asyncio
 import json
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
 from passport_helper import (
     CodexQuota,
     KimiQuota,
+    NUS_RX_UUID,
+    PassportClient,
     build_payloads,
     build_quota_payloads,
     heat_levels,
@@ -132,6 +136,40 @@ class HelperTests(unittest.TestCase):
         levels = heat_levels([0, 1, 10, 100])
         self.assertEqual(levels[0], "0")
         self.assertEqual(levels[-1], "4")
+
+
+class PassportClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pairing_write_timeout_disconnects_partial_connection(self):
+        async def slow_write(*_args, **_kwargs):
+            await asyncio.sleep(10)
+
+        device = type("Device", (), {"name": "Passport-TEST"})()
+        advertisement = type("Advertisement", (), {"service_uuids": []})()
+        fake_client = type("FakeClient", (), {})()
+        fake_client.is_connected = True
+        fake_client.connect = AsyncMock()
+        fake_client.write_gatt_char = AsyncMock(side_effect=slow_write)
+        fake_client.stop_notify = AsyncMock()
+        fake_client.disconnect = AsyncMock()
+
+        passport = PassportClient()
+        passport.pairing_write_timeout = 0.01
+        passport.disconnect_timeout = 0.1
+
+        with patch("passport_helper.BleakScanner.discover", new=AsyncMock(
+            return_value={"test": (device, advertisement)}
+        )), patch("passport_helper.BleakClient", return_value=fake_client):
+            with self.assertRaisesRegex(RuntimeError, "蓝牙配对等待超时"):
+                await passport.__aenter__()
+
+        fake_client.write_gatt_char.assert_awaited_once_with(
+            NUS_RX_UUID,
+            b'{"cmd":"status"}\n',
+            response=True,
+        )
+        fake_client.stop_notify.assert_awaited_once()
+        fake_client.disconnect.assert_awaited_once()
+        self.assertIsNone(passport.client)
 
 
 if __name__ == "__main__":
