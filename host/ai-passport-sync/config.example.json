@@ -1,0 +1,20 @@
+{
+  "name": "TRAVELER",
+  "tagline": "EXPLORING WITH AI",
+  "interests": ["AI", "CODE", "HARDWARE"],
+  "links": [
+    {
+      "l": "GITHUB",
+      "u": "https://github.com/your-name"
+    }
+  ],
+  "revision": "A",
+  "passport_number": "0001",
+  "issued": "2026-01-01",
+  "device_name_prefix": "Passport-",
+  "history_root": "~/.claude/projects",
+  "cc_switch_db": "~/.cc-switch/cc-switch.db",
+  "codex_command": "codex",
+  "kimi_quota_timeout": 15,
+  "theme_aliases": {}
+}

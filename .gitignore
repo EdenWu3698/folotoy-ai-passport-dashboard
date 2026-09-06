@@ -1,0 +1,12 @@
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
+.vscode/
+.DS_Store
+host/ai-passport-sync/.venv/
+host/ai-passport-sync/config.json
+host/ai-passport-sync/logs/
+__pycache__/
+*.py[cod]

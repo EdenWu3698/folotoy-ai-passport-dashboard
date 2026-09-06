@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.5.3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build C host tests
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          cmake -S tests -B build-host
+          cmake --build build-host --parallel
+      - name: Run C host tests
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          ctest --test-dir build-host --output-on-failure
+      - name: Run helper tests
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          python -m pip install -r host/ai-passport-sync/requirements.txt
+          python -m unittest discover -s host/ai-passport-sync/tests -v
+
+  firmware-build:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.5.3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ESP32-C3 firmware
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py set-target esp32c3
+          idf.py build
